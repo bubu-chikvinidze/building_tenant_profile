@@ -1,5 +1,11 @@
-
---why are lease lengths unavailable sometimes? I have 8.2k such cases with filters below. when do have bondmonthscovered available though...
+/* This is the development sample that generates all the variables and target for the building tenant profile project.
+   Every WITH statement contains its own commentary to explain what is happening in each code section.
+   
+   First WITH statement defines set of buildings where approval statuses of correcponding applications was
+   explicitly available through landlord referral. Purpose of this WITH is to define application statuses
+   as well as gather some basic features about a building. Most of the variables are aggregated with max()
+   function because of the group by function.
+*/
 with approval_statuses_explicit as (
     select 
          max(e.source_id) buildingid
@@ -36,6 +42,10 @@ with approval_statuses_explicit as (
         and a.months_covered is not null
     group by b.source_id     
 ) 
+/* 
+    This intermediary code is used to identify dublicates from the building rules table.
+    At the time of writing this code, there was one such building available.
+*/
 , duplicated_rules as ( -- there is one such building for now
     select 
         z.id
@@ -43,6 +53,11 @@ with approval_statuses_explicit as (
     group by z.id
     having count(1)>1
 )
+/* 
+    Where approval status of an application is not available explicityly, inference by building rules is used.
+    This WITH creates inference logic to create approval status, as well as gathers basic variables about the building. 
+    Note that gathering of applications starts at the same time as landlord referral program. 
+*/
 , approval_statuses_inferred as (
     select 
      z.id buildingid
@@ -221,6 +236,7 @@ where 1=1
     left join "REPORTS".DBT_BCHIKVINIDZE.BUILDING_RULES z on z.id = a.buildingid
     where a.id not in (select id from approval_statuses_inferred)
 )*/
+/* merging explicit and inferred statuses as well as some basic data about buildings*/
 , explicit_and_inferred_statuses as (
     select
          buildingid 
@@ -309,6 +325,10 @@ select
     ,round(case when a.units <> 0 then (apps_cnt_12M/a.units)/12 end, 3) tg_utilization_12m
 from building_period_intermediaty a
 )*/
+/* This WITH statement contains final logic for target creation.
+   There are some other versions of target which were not pursued in this project, are kept in script for history purposes.
+   Inference type was used for analytic purposes.
+*/
 , building_profile as (
     select --3.3k buildings with at least 1 apps, 
          a.buildingid
@@ -346,6 +366,15 @@ from building_period_intermediaty a
     --and a.approval_status is not null
     group by a.buildingid, a.units, a.latitude, a.longitude, a.landlord_source_id, a.zip, a.state, a.city, a.street, a.year_built, a.name
 )
+/* From this point on, every WITH statement is for gathering features. Development sample is already defined in
+   previous WITH statements. First set for features is college distance data. 
+   Source for this table comes from snowflake marketplace. Definitions for the columns are not available in snowflake.
+   Column definitions were gathered from external source and are loaded into the google drive:
+   https://drive.google.com/file/d/1zyEfFPXRjirW8HW7BPb_Kx6JTcf9uxG6/view?usp=sharing 
+   In this sql snippet, every building is joined to every college to calculate each possible distance.
+   Distance is calculated using HAVERSINE inbuilt function.
+   Note: College data is assumed to be static and might be updated once a year (or less frequently)
+*/
 , colleges_distances as (
     select 
         a.buildingid building_id 
@@ -372,6 +401,11 @@ from building_period_intermediaty a
         and b.longitude is not null
         and b.CURROPER = 1 -- operational
 )
+/* Contains college features per building.
+   Features include both counts of coleges in specific set of radii as well as 
+   drill down of what kind of colleges these are, what are the costs, complition rates and sizes.
+   distance ranges were chosen by discussing with the team and subjective opinion. 
+*/
 , building_college as (
 select 
     a.building_id
@@ -439,6 +473,13 @@ select
 from colleges_distances a
 group by a.building_id
 )
+/* Unemployment data gathered by risk team. 
+   Data is filtered to include rows up to and including May 2020. Reason for this is
+   we want to have as little intersection with the taget period as possibe, to minimize
+   risk of using future variables (meaning using future to predict future, when in reality we should use past to predict future).
+   Remember, application approval statuses are collected from June 2020.
+   More information about what msa codes are can be found here: https://www.investopedia.com/terms/m/msa.asp
+*/
 , unemployment as (
     select 
          f.msa_code
@@ -448,6 +489,10 @@ group by a.building_id
     and (f.year = 2020 and f.month <= 5) or (f.year = 2019 and f.month > 5)
     group by f.msa_code
 )
+/* Hospita data is also assumed as static (like college data). 
+   Data was found online: https://hifld-geoplatform.opendata.arcgis.com/datasets/geoplatform::hospitals-1/about
+   it was loaded as .csv from dbt.
+*/
 , hospital_distances as (
     select
          a.buildingid building_id 
@@ -464,6 +509,8 @@ group by a.building_id
     where 1=1
         and b.status = 'OPEN'      
 )
+/* Feature creation logic is similar to college data feature creation logic.
+*/
 , building_hospital as (
     select
          a.building_id
@@ -487,13 +534,22 @@ group by a.building_id
     from hospital_distances a
     group by a.building_id
 )
+/* Source of this WITH is csv that I got from michael (originally from tyler), then used dbt for importing.
+   Note that this file containes dublicates, meaning one zip could correspond to more than one cbsa.
+   Aggregate function was used to avoid dupes (3.6k dupe out of total of 32.3k). 
+   For now there is no way to decide exactly which cbsa code should be used in case of dupes so I'm sticking with
+   max function for simplicity. 
+*/
 , cbsa_zip_mapping as (
     select 
          zip
         ,max(cbsa) cbsa_code
-    from reports.dbt_bchikvinidze.cbsa_zip_mapping -- csv that I got from michael (originally from tyler)
+    from reports.dbt_bchikvinidze.cbsa_zip_mapping -- 
     group by zip -- I have some dupes, reason unknown. That's why I'm taking maximum of cbsa codes
 )
+/* Per capita income is gathered by risk team. source: – BEA, CAINC1 Personal Income Summary: https://www.bea.gov/data/income-saving/personal-income-county-metro-and-other-areas
+   reason for grouping is again to avoid dupes (this one had just one dupe)
+*/
 , per_capita_income as (
     select 
          a.cbsa_code
@@ -512,6 +568,9 @@ group by a.building_id
     join TG_DW_DB.PUBLIC.building b on b.landlord_source_id = a.source_id -- 3986
     group by a.source_id
 )*/
+/* Law enforcement data is handled as static data, like college and hospital data.
+   original source is here: https://hifld-geoplatform.opendata.arcgis.com/datasets/local-law-enforcement-locations/explore?location=36.557550%2C-76.088187%2C3.86&showTable=true
+*/
 , law_enforcement_distances as (
     select 
          a.buildingid building_id 
@@ -521,6 +580,7 @@ group by a.building_id
     where 1=1
     and b.status = 'OPEN'
 )
+/* Structure for law enforcement features is same as for college and hospital features.*/
 , building_law_enforcement as (
     select
          a.building_id
@@ -531,6 +591,12 @@ group by a.building_id
     from law_enforcement_distances a
     group by a.building_id
 )
+/* Public and private school data. original source is from:
+   https://hifld-geoplatform.opendata.arcgis.com/datasets/private-schools-1/about
+   https://hifld-geoplatform.opendata.arcgis.com/datasets/geoplatform::public-schools/about
+   These tables did not have identical columns, so inference was needed to identify private elementary schools.
+   "level_" = 1 in private schools table was handled as elementary school by comparing level distribution with public school level_ distribution.
+*/
 , schools_union as (
     select
          a.objectid
@@ -554,6 +620,7 @@ group by a.building_id
         ,case when level_ = 1 then 'ELEMENTARY' end level
     from reports.dbt_bchikvinidze.private_schools b
 )
+/* Intermediary table to calculate distance between all pairs of buildings and schools*/
 , schools_distances as (
     select
          a.buildingid building_id 
@@ -564,6 +631,10 @@ group by a.building_id
     from building_profile  a
     join schools_union b
 )
+/* Features here are calculated by the same style as other POI features (college,hospital,law enforcement)
+   This time shorter distances are considered (not more than 10KM) because, as opposed to far-away colleges,
+   kids usually go to nearby school.
+*/
 , building_schools as ( -- takes 4.5 minutes
     select
          a.building_id
@@ -583,6 +654,9 @@ group by a.building_id
     from schools_distances a
     group by a.building_id
 )
+/* collected by risk team. source from census:  ACS B25031 and ACS B25063
+   Aggregate function is used because sometimes more than one area corresponds to one msa code.
+*/
 , gross_rent as (
     select
      a.msa_code
@@ -593,6 +667,9 @@ group by a.building_id
     from ML.RISK_MODEL_TRAINING.gross_rent a
     group by a.msa_code, a.year
 )
+/* intermediary table for more feature engineering with POI data.
+   Result of this WITH is counts by zip code and POI.
+*/
 , points_of_interest_per_zip as (
     select try_to_number(zip) zip, count(1) cnt, 'law_enforcement' poi from reports.dbt_bchikvinidze.law_enforcement_locations group by zip
     union all
@@ -604,6 +681,7 @@ group by a.building_id
     union all
     select try_to_number(zip) zip, count(1) cnt, 'colleges' poi from ext_college_scorecard.college_scorecard.merged2018_19_pp   group by zip
 )
+/* count of each POI category in zip */
 , poi_per_zip as (
     select 
         a.zip
@@ -615,6 +693,11 @@ group by a.building_id
     from points_of_interest_per_zip a
     group by a.zip
 )
+/* Here is google review data, loaded as .csv file after being scraped by selenium on google maps.
+   Reason for risk team's data not being used, that has already been loaded into snowflake, is that
+   it did not have any filtering by time. The data in below WITH is at least 1 year old to decrease overlap
+   with target period.
+*/
 , google_reviews as (
     select 
          b.source_id buildingid
@@ -630,6 +713,14 @@ group by a.building_id
                                         (lower(a.address) = lower(concat(b.name, ',', b.city, ',', b.state))))
     group by buildingid
 )
+/* ALN data: intermediary data for Amenity. contains amenity counts per apartment building. 
+   There are 62 different amenities which are divided into 13 amenity groups in the database, but for
+   our purposes I have combined these groups that have similar content, to avoid having to add too many new variables
+   to my already small dataset.
+   The view VW_APTAMENITY is created in such a way that every apartment has every type of amenity joined to it, but further filters
+   are required to actually determine which amenity is active for a building. This is why "value" column is used in filters, as well as "qty"
+   column. Testing if these filters were correct was done by opening ALN webpage and checking a few cases. 
+*/
 , aln_amenity as (
     select 
          a.apartmentid
@@ -645,6 +736,16 @@ group by a.building_id
     where (a.qty > 0 or a.value in ('Y', '*', 'Included'))
     group by a.apartmentid
 )
+/* Following 3 WITH statements are joining DW building to its corresponding ALN management company through hubspot as intermediary.
+   the main table that contains pre-determined maping between hubspot and ALN management company is in reports.prod.aln_to_hs_company_mapping table.
+   That table was filled in by the sales team. Actual technical work for this table was done by Bill (William) Matrinez. matchig logic for creating
+   this table includes name matching after filtering of state, done in google sheets. Bill assumes that around 90% of all matches should be 
+   correct.
+   Hubspot contains both buildings and their respective management companies as rows, and they have parent-child relationship (child - building,
+   parent - management company). This joining logic was supplied by Michael. 
+   Note: these three WITH statements don't cover many of the buildings in our development sample. For those, another matching logic
+   was developed without HUBSPOT intermediary. Will be discussed later.
+*/
 , building_to_aln_company_match1 as (
     SELECT -- 5.2k buildings matched
      distinct b.source_id
@@ -660,6 +761,10 @@ group by a.building_id
     join ext_data.aln_data."ManagementCompany" a on a."MgmtOfficeIntegerId" = m.aln_id -- 5.2k
     group by b.source_id, hubspot_buildingId, hubspot_parentId
 )
+/* Sometimes child to parent relationship is not enough to trace management company to its ALN counterpart.
+   So another layer is joined to create child to grandparent relationship, that identifies extra observations.
+   This WITH runs on buildings for which match was not found in previous WITH statement
+*/
 , building_to_aln_company_match2 as (
     SELECT -- 3 joins - 24, 4 joins - 28
          b.source_id
@@ -678,6 +783,9 @@ group by a.building_id
     where b.source_id not in (select source_id from building_to_aln_company_match1)
     group by b.source_id, hubspot_buildingId, hubspot_parentId 
 )
+/* in very few cases we need deeper connection (child to great-grandparent). No results were observed after even deeper recursive join.
+   This WITH runs on buildings for which previous two WITH did not return results.
+*/
 , building_to_aln_company_match3 as (
     SELECT -- 3 joins - 24, 4 joins - 28
          b.source_id
@@ -698,6 +806,12 @@ group by a.building_id
          and b.source_id not in (select source_id from building_to_aln_company_match2)
     group by b.source_id, hubspot_buildingId, hubspot_parentId 
 )
+/* This next two WITH statements contain matching of DW buildings to ALN Management companies,
+   Developed by using fuzzymatch (by Atahan) plus extra rules of matching either phone number or email domain.
+   Original code for matching can be found in databricks: https://dbc-bff98e28-6039.cloud.databricks.com/?o=1167741459609899#notebook/2359178861470069/command/2359178861470070
+   table written to snowflake by importing csv though dbt.
+   The matching did produce some dupes so to identify those, this next WITH statement is used:
+*/
 , dup_landlord_dw_to_aln_match_by_datateam as (
     select 
          id_tg
@@ -706,6 +820,10 @@ group by a.building_id
     group by id_tg 
     having count(1)>1
 )
+/* Matching of DW building to ALN Management company. 
+   Cases where dupes happened are removed as we have no way of determining which one of those management
+   companies was correct. 
+*/
 , landlord_dw_to_aln_match_by_datateam as (
     select 
         distinct e.source_id
@@ -720,6 +838,9 @@ group by a.building_id
     where a.id_tg not in (select id_tg from dup_landlord_dw_to_aln_match_by_datateam)
     group by e.source_id, aln_id, landlord_source_id
 )
+/* merging all matches between DW building and ALN management company, that were identified by 
+   fuzzy match+phone/domain rule, or were matched through hubspot. 
+*/
 , building_to_aln_company_match as (
     select * from building_to_aln_company_match1 a
         union all 
@@ -733,6 +854,10 @@ group by a.building_id
         and d.source_id not in (select source_id from building_to_aln_company_match2)
         and d.source_id not in (select source_id from building_to_aln_company_match3) */
 )
+/* WITH statement to collect some basic variables from ALN buildings as well as filter dupes (600 dupes at the time of writing)
+   Filter of incative apartmentIDs was not used as it did not result in decrease of rows.
+   some apartment statuses were removed for obvious reasons, like in case of duplicate entry, being closed or for sale, rather than rent.
+*/
 , aln_unique_property as ( -- this WITH is just for removing dublicates from ApartmentPropertyExtension (600 dupes)
     select 
          a."ApartmentId" ApartmentId
@@ -749,6 +874,9 @@ group by a.building_id
      --and a."ApartmentId" not in (select "InactiveEntityId" from ext_data.aln_data."InactiveEntity") -- this filter did not result in count decrease of rows
     group by a."ApartmentId"
 )
+/* self explanatory. is used to identify state and zip of management company.
+   Group by used to avoid a few dupes (at this time, 4 were found)
+*/
 , mgmt_co_address as (
     select 
          a."ManagementCompanyEntityId" ManagementCompanyEntityId
@@ -760,7 +888,11 @@ group by a.building_id
         and "AddressType" = 'Physical'
     group by a."ManagementCompanyEntityId"
 )
-, units_state_management_company as (
+/*  Zip code where ALN management company has most of its units located.
+    "qualify" function makes it possible to filter by window function, without needing another WITH statement.
+    zip code needs some altering as it sometimes includes more numbers after zip code in "addresszip" column.
+*/
+, units_zip_management_company as (
     select 
          a.CorporateManagementCompanyId
         ,c."MgmtOfficeIntegerId"
@@ -774,6 +906,8 @@ group by a.building_id
     group by a.CorporateManagementCompanyId, c."MgmtOfficeIntegerId", zip
     qualify row_number() over (partition by a.CorporateManagementCompanyId order by total_units desc) = 1
 )
+/* Handles most of the feature engineering using ALN management company data.
+*/
 , management_company_by_corporate as (
     select --11.5k companies
          a.CorporateManagementCompanyId
@@ -804,25 +938,28 @@ group by a.building_id
         ,max(e.AddressZIP) ll_AddressZIP
         ,max(g.zip) ll_most_units_in_zip
         --,try_to_number(substr(f."NumberOfUnits", 0, position(' ' in f."NumberOfUnits")-1)) new_units_construction_cnt
-        ,round(sum(h.lifestyle_amenity_cnt)/ll_apartment_cnt,1) avg_ll_lifestyle_amenity_cnt_per_unit
-        ,round(sum(h.household_amenity_cnt)/ll_apartment_cnt,1) avg_ll_household_amenity_cnt_per_unit
-        ,round(sum(h.service_amenity_cnt)/ll_apartment_cnt,1) avg_ll_service_amenity_cnt_per_unit
-        ,round(sum(h.transport_related_amenity_cnt)/ll_apartment_cnt,1) avg_ll_transport_related_amenity_cnt_per_unit
-        ,round(sum(h.safety_amenity_cnt)/ll_apartment_cnt,1) avg_ll_safety_amenity_cnt_per_unit
-        ,round(sum(h.utility_amenity_cnt)/ll_apartment_cnt,1) avg_ll_utility_amenity_cnt_per_unit
+        ,round(sum(h.lifestyle_amenity_cnt)/ll_apartment_cnt,1) avg_ll_lifestyle_amenity_cnt_per_building 
+        ,round(sum(h.household_amenity_cnt)/ll_apartment_cnt,1) avg_ll_household_amenity_cnt_per_building 
+        ,round(sum(h.service_amenity_cnt)/ll_apartment_cnt,1) avg_ll_service_amenity_cnt_per_building
+        ,round(sum(h.transport_related_amenity_cnt)/ll_apartment_cnt,1) avg_ll_transport_related_amenity_cnt_per_building
+        ,round(sum(h.safety_amenity_cnt)/ll_apartment_cnt,1) avg_ll_safety_amenity_cnt_per_building
+        ,round(sum(h.utility_amenity_cnt)/ll_apartment_cnt,1) avg_ll_utility_amenity_cnt_per_building
     from aln_unique_property a
     left join "EXT_DATA"."ALN_DATA"."ManagementCompany" c on c."ManagementCompanyEntityId" = a.CorporateManagementCompanyId
     left join "EXT_DATA"."ALN_DATA"."ApartmentLeasingExtension" b on b."ApartmentId" = a.ApartmentId
     left join "EXT_DATA"."ALN_DATA"."ApartmentPetExtension" d on d."ApartmentId" = a.ApartmentId
     left join mgmt_co_address e on e.ManagementCompanyEntityId = c."ManagementCompanyEntityId"
     left join "EXT_DATA"."ALN_DATA"."NewConstruction" f on f."ApartmentId" = a.ApartmentId
-    left join units_state_management_company g on g.CorporateManagementCompanyId = a.CorporateManagementCompanyId
+    left join units_zip_management_company g on g.CorporateManagementCompanyId = a.CorporateManagementCompanyId
     left join aln_amenity h on h.apartmentid = b."ApartmentId"
     where 1=1
         and a.ApartmentId is not null
         and a.CorporateManagementCompanyId is not null
     group by a.CorporateManagementCompanyId, c."MgmtOfficeIntegerId"
 )
+/* joining of dw building with ALN management company features.
+   There should not be need to use aggregate function but is used just in case to avoid dupes.
+*/
 , building_company_aln as (
    select --5.2k buildings matched... not great not terribe (c) chernobyl
          a.source_id buildingid
@@ -851,16 +988,19 @@ group by a.building_id
         ,max(b.ll_AddressState) ll_AddressState
         ,max(b.ll_AddressZIP) ll_AddressZIP
         ,max(b.ll_most_units_in_zip) ll_most_units_in_zip
-        ,max(b.avg_ll_lifestyle_amenity_cnt_per_unit) avg_ll_lifestyle_amenity_cnt_per_unit
-        ,max(b.avg_ll_household_amenity_cnt_per_unit) avg_ll_household_amenity_cnt_per_unit
-        ,max(b.avg_ll_service_amenity_cnt_per_unit) avg_ll_service_amenity_cnt_per_unit
-        ,max(b.avg_ll_transport_related_amenity_cnt_per_unit) avg_ll_transport_related_amenity_cnt_per_unit
-        ,max(b.avg_ll_safety_amenity_cnt_per_unit) avg_ll_safety_amenity_cnt_per_unit
-        ,max(b.avg_ll_utility_amenity_cnt_per_unit) avg_ll_utility_amenity_cnt_per_unit
+        ,max(b.avg_ll_lifestyle_amenity_cnt_per_building) avg_ll_lifestyle_amenity_cnt_per_building
+        ,max(b.avg_ll_household_amenity_cnt_per_building) avg_ll_household_amenity_cnt_per_building
+        ,max(b.avg_ll_service_amenity_cnt_per_building) avg_ll_service_amenity_cnt_per_building
+        ,max(b.avg_ll_transport_related_amenity_cnt_per_building) avg_ll_transport_related_amenity_cnt_per_building
+        ,max(b.avg_ll_safety_amenity_cnt_per_building) avg_ll_safety_amenity_cnt_per_building
+        ,max(b.avg_ll_utility_amenity_cnt_per_building) avg_ll_utility_amenity_cnt_per_building
     from building_to_aln_company_match a
     join management_company_by_corporate b on b."MgmtOfficeIntegerId" = a.aln_id
     group by buildingid
 )
+/* matching by Atahan to connect DW buildings to ALN buildings.
+   There are multiple matches in some cases, for those last one to be updated in ALN is chosen.
+*/
 , dw_to_aln_building_matching as (
     select  --1,994, 41 dupes
          a.id_mon
@@ -870,6 +1010,9 @@ group by a.building_id
     join ext_data.aln_data."Apartment" b on a.id_aln = b."ApartmentId"
     qualify row_number() over (partition by a.id_mon order by b."LastDateUpdated" desc) = 1
 )
+/* ALN building features. These were coseb by going over what tables/columns were available in ALN and picking each one that 
+   count potentially be of predictive power.
+*/
 , aln_building as (
     select 
          a.id_mon buildingid
@@ -897,12 +1040,16 @@ group by a.building_id
     left join ext_data.aln_data."ApartmentPetExtension" d on a.id_aln = d."ApartmentId"
     left join aln_amenity e on e.apartmentid = a.id_aln
 )
+/* table supplied by Michae, to match MSA code to MSA name.*/
 , msa_names as (
     select 
          distinct lower(msa_name) msa_name
         ,msa_number
     from TG_APP_DB.TG_MANUAL.ZIP_METRO_MAPPING
 )
+/* Crime data by msa, from fbi: https://ucr.fbi.gov/crime-in-the-u.s/2019/crime-in-the-u.s.-2019/tables/table-6
+   imported as csv file for year 2019. in case this variable is left in the model, will need to be updated once a year at most.
+*/
 , fbi_crime_by_msa as (
     select 
          max(a.VIOLENT_CRIME_PER_100K) VIOLENT_CRIME_PER_100K
@@ -912,6 +1059,7 @@ group by a.building_id
     join msa_names b on lower(b.msa_name) = lower(concat(msa1, ', ', msa2, ' msa'))
     group by b.msa_number
 )
+/* This is final join of all the features that were gathered for each building */
 --, tmp as (
     select -- around 2 minutes to run (limit 50)
 a.buildingid
@@ -1062,12 +1210,12 @@ a.buildingid
 ,r.ll_AddressState
 ,r.ll_AddressZIP
 ,r.ll_most_units_in_zip
-,r.avg_ll_lifestyle_amenity_cnt_per_unit
-,r.avg_ll_household_amenity_cnt_per_unit
-,r.avg_ll_service_amenity_cnt_per_unit
-,r.avg_ll_transport_related_amenity_cnt_per_unit
-,r.avg_ll_safety_amenity_cnt_per_unit
-,r.avg_ll_utility_amenity_cnt_per_unit
+,r.avg_ll_lifestyle_amenity_cnt_per_building
+,r.avg_ll_household_amenity_cnt_per_building
+,r.avg_ll_service_amenity_cnt_per_building
+,r.avg_ll_transport_related_amenity_cnt_per_building
+,r.avg_ll_safety_amenity_cnt_per_building
+,r.avg_ll_utility_amenity_cnt_per_building
 ,s.aln_NumUnits
 ,s.aln_built_years_ago
 ,s.aln_Occupancy
@@ -1114,4 +1262,3 @@ and ((units<=60 and CNT_STATUS_AVAILABLE_APPS>=4) or
      (units>60 and units <= 100 and CNT_STATUS_AVAILABLE_APPS>=6) or
      (units>100 and CNT_STATUS_AVAILABLE_APPS>=8))*/
     -- group by a.buildingid having count(1)>1
-select * from ml.model_performance.model_input_metrics
