@@ -1059,9 +1059,40 @@ group by a.building_id
     join msa_names b on lower(b.msa_name) = lower(concat(msa1, ', ', msa2, ' msa'))
     group by b.msa_number
 )
+/* Features for ALN LL zip code with most units in it.
+   Aggregate function is just for using group by without error.
+*/
+, ll_zip_features as (
+    select 
+         try_to_number(a.ll_most_units_in_zip::text) zip_ll
+        ,max(f.avg_unemployment_rate_1y) ll_zip_avg_unemployment_rate_1y
+        ,max(g.median_gross_rent_all_bedrooms) ll_zip_median_gross_rent_all_bedrooms
+        ,max(g.median_gross_rent_no_bedrooms) ll_zip_median_gross_rent_no_bedrooms
+        ,max(g.median_gross_rent_one_bedroom) ll_zip_median_gross_rent_one_bedroom
+        ,max(k.per_capita_income) ll_zip_per_capita_income
+        ,max(try_to_number(k2.median_household_income)) ll_zip_median_household_income
+        ,max(try_to_number(k2.median_family_income)) ll_zip_median_family_income
+        ,max(o.median_age) ll_zip_median_age
+        ,max(p.population_density) ll_zip_population_density
+        ,max(round(p.population/q.public_school_cnt, 1)) ll_zip_population_per_public_school
+        ,max(round(p.population/q.private_school_cnt, 1)) ll_zip_population_per_private_school
+        ,max(round(p.population/q.hospital_cnt, 1)) ll_zip_population_per_hospital
+        ,max(round(p.population/q.college_cnt, 1)) ll_zip_population_per_college
+    from building_company_aln a
+    join TG_APP_DB.TG_MANUAL.ZIP_METRO_MAPPING e on e.zip_code = zip_ll
+    left join unemployment f on f.msa_code = e.msa_number
+    left join gross_rent g on g.msa_code = e.msa_number and g.year = 2019
+    left join cbsa_zip_mapping j on j.zip = zip_ll
+    left join per_capita_income k on k.cbsa_code = j.cbsa_code
+    left join "REPORTS".DBT_BCHIKVINIDZE.MEDIAN_INCOME_BY_ZIP k2 on try_to_number(k2.zip) = zip_ll
+    left join reports.dbt_bchikvinidze.median_age_zip o on o.zip_code = zip_ll
+    left join reports.dbt_bchikvinidze.population_density_zip p on try_to_number(p.zip) = zip_ll
+    left join poi_per_zip q on q.zip = zip_ll
+    group by zip_ll
+)
 /* This is final join of all the features that were gathered for each building */
 --, tmp as (
-    select -- around 2 minutes to run (limit 50)
+select -- around 2 minutes to run (limit 50)
 a.buildingid
 --,count(1) cnt
 ,a.name
@@ -1236,6 +1267,19 @@ a.buildingid
 ,s.utility_amenity_cnt
 ,t.VIOLENT_CRIME_PER_100K
 ,t.PROPERTY_CRIME_PER_100K
+,u.ll_zip_avg_unemployment_rate_1y
+,u.ll_zip_median_gross_rent_all_bedrooms
+,u.ll_zip_median_gross_rent_no_bedrooms
+,u.ll_zip_median_gross_rent_one_bedroom
+,u.ll_zip_per_capita_income
+,u.ll_zip_median_household_income
+,u.ll_zip_median_family_income
+,u.ll_zip_median_age
+,u.ll_zip_population_density
+,u.ll_zip_population_per_public_school
+,u.ll_zip_population_per_private_school
+,u.ll_zip_population_per_hospital
+,u.ll_zip_population_per_college
 from building_profile a
 left join building_college d on a.buildingid = d.building_id
 left join TG_APP_DB.TG_MANUAL.ZIP_METRO_MAPPING e on e.zip_code = try_to_number(a.zip)
@@ -1256,9 +1300,5 @@ left join poi_per_zip q on q.zip = try_to_number(a.zip)
 left join building_company_aln r on r.buildingid = a.buildingid
 left join aln_building s on s.buildingid = a.buildingid
 left join fbi_crime_by_msa t on t.msa_number = e.msa_number
+left join ll_zip_features u on u.zip_ll = try_to_number(r.ll_most_units_in_zip::text)
 where 1=1
-/*and target <> 1
-and ((units<=60 and CNT_STATUS_AVAILABLE_APPS>=4) or
-     (units>60 and units <= 100 and CNT_STATUS_AVAILABLE_APPS>=6) or
-     (units>100 and CNT_STATUS_AVAILABLE_APPS>=8))*/
-    -- group by a.buildingid having count(1)>1
