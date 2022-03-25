@@ -736,6 +736,68 @@ group by a.building_id
     where (a.qty > 0 or a.value in ('Y', '*', 'Included'))
     group by a.apartmentid
 )
+/* WITH statement to collect some basic variables from ALN buildings as well as filter dupes (600 dupes at the time of writing)
+   Filter of incative apartmentIDs was not used as it did not result in decrease of rows.
+   some apartment statuses were removed for obvious reasons, like in case of duplicate entry, being closed or for sale, rather than rent.
+*/
+, aln_unique_property as ( -- this WITH is just for removing dublicates from ApartmentPropertyExtension (600 dupes)
+    select 
+         a."ApartmentId" ApartmentId
+        ,max(a."CorporateManagementCompanyId") CorporateManagementCompanyId
+        ,max(a."NumUnits") NumUnits
+        ,max(a."YearBuilt") YearBuilt
+        ,max(a."Occupancy") Occupancy
+        ,max(a."NumberOfStories") NumberOfStories
+        ,max(a."AverageRent") AverageRent
+        ,max(a."AverageSqFt") AverageSqFt
+    from "EXT_DATA"."ALN_DATA"."ApartmentPropertyExtension" a
+    join "EXT_DATA"."ALN_DATA"."ApartmentStatus" b on a."ApartmentId" = b."ApartmentId"
+    where b."Status" not in (15, 22, 86, 99) --filtering out unnecessary buildings: 15 - duplicate/discarded, 22 - for sale, 86 and 99 - closed (inactive)
+     --and a."ApartmentId" not in (select "InactiveEntityId" from ext_data.aln_data."InactiveEntity") -- this filter did not result in count decrease of rows
+    group by a."ApartmentId"
+)
+/* matching by Atahan to connect DW buildings to ALN buildings.
+   There are multiple matches in some cases, for those last one to be updated in ALN is chosen.
+*/
+, dw_to_aln_building_matching as (
+    select  --1,994, 41 dupes
+         a.id_mon
+        ,b."ApartmentId" id_aln
+        ,b."LastDateUpdated"
+    from "EXT_DATA"."ALN_JOIN"."BUILDING_MATCHED" a
+    join ext_data.aln_data."Apartment" b on a.id_aln = b."ApartmentId"
+    qualify row_number() over (partition by a.id_mon order by b."LastDateUpdated" desc) = 1
+)
+/* ALN building features. These were chosen by going over what tables/columns were available in ALN and picking each one that 
+   count potentially be of predictive power.
+*/
+, aln_building as (
+    select 
+         a.id_mon buildingid
+        ,b.NumUnits aln_NumUnits
+        ,2022 - try_to_number(b.YearBuilt) aln_built_years_ago
+        ,try_to_number(b.Occupancy) aln_Occupancy
+        ,try_to_number(b.NumberOfStories) aln_NumberOfStories
+        ,b.AverageRent aln_AverageRent
+        ,b.AverageSqFt aln_AverageSqFt
+        ,round(case when b.AverageSqFt <> 0 then b.AverageRent/b.AverageSqFt end, 2) aln_rent_over_unit_area
+        ,case when c."IncomeRestricted" = 'N' then 0 when c."IncomeRestricted" = 'Y' then 1 end aln_income_restricted
+        ,case when c."Section8" = 'N' then 0 when c."Section8" = 'Y' then 1 end aln_section8
+        ,case when c."ShortTerm" = 'N' then 0 when c."ShortTerm" = 'Y' then 1 end aln_short_term
+        ,try_to_number(c."ApplicationFee") aln_ApplicationFee
+        ,d."MaxNumPets" aln_MaxNumPets
+        ,e.lifestyle_amenity_cnt
+        ,e.household_amenity_cnt
+        ,e.service_amenity_cnt
+        ,e.transport_related_amenity_cnt
+        ,e.safety_amenity_cnt
+        ,e.utility_amenity_cnt
+    from dw_to_aln_building_matching a
+    join aln_unique_property b on a.id_aln = b.ApartmentId
+    left join "EXT_DATA"."ALN_DATA"."ApartmentLeasingExtension" c on a.id_aln = c."ApartmentId"
+    left join ext_data.aln_data."ApartmentPetExtension" d on a.id_aln = d."ApartmentId"
+    left join aln_amenity e on e.apartmentid = a.id_aln
+)
 /* Following 3 WITH statements are joining DW building to its corresponding ALN management company through hubspot as intermediary.
    the main table that contains pre-determined maping between hubspot and ALN management company is in reports.prod.aln_to_hs_company_mapping table.
    That table was filled in by the sales team. Actual technical work for this table was done by Bill (William) Matrinez. matchig logic for creating
@@ -853,26 +915,6 @@ group by a.building_id
         and d.source_id not in (select source_id from building_to_aln_company_match1) -- adding these just in case original mapping changes, to avoid future dupes.
         and d.source_id not in (select source_id from building_to_aln_company_match2)
         and d.source_id not in (select source_id from building_to_aln_company_match3) */
-)
-/* WITH statement to collect some basic variables from ALN buildings as well as filter dupes (600 dupes at the time of writing)
-   Filter of incative apartmentIDs was not used as it did not result in decrease of rows.
-   some apartment statuses were removed for obvious reasons, like in case of duplicate entry, being closed or for sale, rather than rent.
-*/
-, aln_unique_property as ( -- this WITH is just for removing dublicates from ApartmentPropertyExtension (600 dupes)
-    select 
-         a."ApartmentId" ApartmentId
-        ,max(a."CorporateManagementCompanyId") CorporateManagementCompanyId
-        ,max(a."NumUnits") NumUnits
-        ,max(a."YearBuilt") YearBuilt
-        ,max(a."Occupancy") Occupancy
-        ,max(a."NumberOfStories") NumberOfStories
-        ,max(a."AverageRent") AverageRent
-        ,max(a."AverageSqFt") AverageSqFt
-    from "EXT_DATA"."ALN_DATA"."ApartmentPropertyExtension" a
-    join "EXT_DATA"."ALN_DATA"."ApartmentStatus" b on a."ApartmentId" = b."ApartmentId"
-    where b."Status" not in (15, 22, 86, 99) --filtering out unnecessary buildings: 15 - duplicate/discarded, 22 - for sale, 86 and 99 - closed (inactive)
-     --and a."ApartmentId" not in (select "InactiveEntityId" from ext_data.aln_data."InactiveEntity") -- this filter did not result in count decrease of rows
-    group by a."ApartmentId"
 )
 /* self explanatory. is used to identify state and zip of management company.
    Group by used to avoid a few dupes (at this time, 4 were found)
@@ -997,48 +1039,6 @@ group by a.building_id
     from building_to_aln_company_match a
     join management_company_by_corporate b on b."MgmtOfficeIntegerId" = a.aln_id
     group by buildingid
-)
-/* matching by Atahan to connect DW buildings to ALN buildings.
-   There are multiple matches in some cases, for those last one to be updated in ALN is chosen.
-*/
-, dw_to_aln_building_matching as (
-    select  --1,994, 41 dupes
-         a.id_mon
-        ,b."ApartmentId" id_aln
-        ,b."LastDateUpdated"
-    from "EXT_DATA"."ALN_JOIN"."BUILDING_MATCHED" a
-    join ext_data.aln_data."Apartment" b on a.id_aln = b."ApartmentId"
-    qualify row_number() over (partition by a.id_mon order by b."LastDateUpdated" desc) = 1
-)
-/* ALN building features. These were coseb by going over what tables/columns were available in ALN and picking each one that 
-   count potentially be of predictive power.
-*/
-, aln_building as (
-    select 
-         a.id_mon buildingid
-        ,b.NumUnits aln_NumUnits
-        ,2022 - try_to_number(b.YearBuilt) aln_built_years_ago
-        ,try_to_number(b.Occupancy) aln_Occupancy
-        ,try_to_number(b.NumberOfStories) aln_NumberOfStories
-        ,b.AverageRent aln_AverageRent
-        ,b.AverageSqFt aln_AverageSqFt
-        ,round(case when b.AverageSqFt <> 0 then b.AverageRent/b.AverageSqFt end, 2) aln_rent_over_unit_area
-        ,case when c."IncomeRestricted" = 'N' then 0 when c."IncomeRestricted" = 'Y' then 1 end aln_income_restricted
-        ,case when c."Section8" = 'N' then 0 when c."Section8" = 'Y' then 1 end aln_section8
-        ,case when c."ShortTerm" = 'N' then 0 when c."ShortTerm" = 'Y' then 1 end aln_short_term
-        ,try_to_number(c."ApplicationFee") aln_ApplicationFee
-        ,d."MaxNumPets" aln_MaxNumPets
-        ,e.lifestyle_amenity_cnt
-        ,e.household_amenity_cnt
-        ,e.service_amenity_cnt
-        ,e.transport_related_amenity_cnt
-        ,e.safety_amenity_cnt
-        ,e.utility_amenity_cnt
-    from dw_to_aln_building_matching a
-    join aln_unique_property b on a.id_aln = b.ApartmentId
-    left join "EXT_DATA"."ALN_DATA"."ApartmentLeasingExtension" c on a.id_aln = c."ApartmentId"
-    left join ext_data.aln_data."ApartmentPetExtension" d on a.id_aln = d."ApartmentId"
-    left join aln_amenity e on e.apartmentid = a.id_aln
 )
 /* table supplied by Michae, to match MSA code to MSA name.*/
 , msa_names as (
